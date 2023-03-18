@@ -1,6 +1,5 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
-
 using System.Collections.Immutable;
 using System.Globalization;
 using System.Reflection;
@@ -11,7 +10,7 @@ using CodeGenHelpers = StreamJsonRpc.Reflection.CodeGenHelpers;
 
 // Uncomment the SaveAssembly symbol and run one test to save the generated DLL for inspection in ILSpy as part of debugging.
 #if NETFRAMEWORK
-////#define SaveAssembly
+#define SaveAssembly
 #endif
 
 namespace StreamJsonRpc;
@@ -251,23 +250,31 @@ internal static class ProxyGeneration
             foreach ((TypeInfo rpcInterface, int? rpcInterfaceCode) in rpcInterfaces)
             {
                 RpcTargetInfo.MethodNameMap methodNameMap = RpcTargetInfo.GetMethodNameMap(rpcInterface);
-                foreach (MethodInfo method in FindAllOnThisAndOtherInterfaces(rpcInterface, i => i.DeclaredMethods).Where(m => !m.IsSpecialName))
+                foreach (MethodInfo method in FindAllOnThisAndOtherInterfaces(rpcInterface, i => i.DeclaredMethods)
+                             .Where(m => !m.IsSpecialName))
                 {
                     if (!implementedMethods.Add(method))
                     {
                         continue;
                     }
 
-                    bool returnTypeIsTask = method.ReturnType == typeof(Task) || (method.ReturnType.GetTypeInfo().IsGenericType && method.ReturnType.GetGenericTypeDefinition() == typeof(Task<>));
-                    bool returnTypeIsValueTask = method.ReturnType == typeof(ValueTask) || (method.ReturnType.GetTypeInfo().IsGenericType && method.ReturnType.GetGenericTypeDefinition() == typeof(ValueTask<>));
-                    bool returnTypeIsIAsyncEnumerable = method.ReturnType.IsGenericType && method.ReturnType.GetGenericTypeDefinition() == typeof(IAsyncEnumerable<>);
+                    bool returnTypeIsTask = method.ReturnType == typeof(Task) ||
+                                            (method.ReturnType.GetTypeInfo().IsGenericType &&
+                                             method.ReturnType.GetGenericTypeDefinition() == typeof(Task<>));
+                    bool returnTypeIsValueTask = method.ReturnType == typeof(ValueTask) ||
+                                                 (method.ReturnType.GetTypeInfo().IsGenericType &&
+                                                  method.ReturnType.GetGenericTypeDefinition() == typeof(ValueTask<>));
+                    bool returnTypeIsIAsyncEnumerable = method.ReturnType.IsGenericType &&
+                                                        method.ReturnType.GetGenericTypeDefinition() ==
+                                                        typeof(IAsyncEnumerable<>);
                     bool returnTypeIsVoid = method.ReturnType == typeof(void);
                     VerifySupported(returnTypeIsVoid || returnTypeIsTask || returnTypeIsValueTask || returnTypeIsIAsyncEnumerable, Resources.UnsupportedMethodReturnTypeOnClientProxyInterface, method, method.ReturnType.FullName!);
-                    VerifySupported(!method.IsGenericMethod, Resources.UnsupportedGenericMethodsOnClientProxyInterface, method);
 
                     bool hasReturnValue = method.ReturnType.GetTypeInfo().IsGenericType;
                     Type? invokeResultTypeArgument = hasReturnValue
-                        ? (returnTypeIsIAsyncEnumerable ? method.ReturnType : method.ReturnType.GetTypeInfo().GenericTypeArguments[0])
+                        ? (returnTypeIsIAsyncEnumerable
+                            ? method.ReturnType
+                            : method.ReturnType.GetTypeInfo().GenericTypeArguments[0])
                         : null;
 
                     string methodName = method.Name;
@@ -279,11 +286,26 @@ internal static class ProxyGeneration
                     }
 
                     ParameterInfo[] methodParameters = method.GetParameters();
-                    MethodBuilder methodBuilder = proxyTypeBuilder.DefineMethod(
-                        methodName,
-                        MethodAttributes.Private | MethodAttributes.Final | MethodAttributes.HideBySig | MethodAttributes.NewSlot | MethodAttributes.Virtual,
-                        method.ReturnType,
-                        methodParameters.Select(p => p.ParameterType).ToArray());
+                    MethodBuilder methodBuilder = proxyTypeBuilder.DefineMethod(methodName, MethodAttributes.Private | MethodAttributes.Final | MethodAttributes.HideBySig | MethodAttributes.NewSlot | MethodAttributes.Virtual);
+
+                    var typeRemapping = new Dictionary<Type, Type>();
+                    if (method.IsGenericMethod)
+                    {
+                        Type[] genericArguments = method.GetGenericArguments();
+                        string[] genericArgumentNames = Array.ConvertAll(genericArguments, genericArgument => genericArgument.Name);
+                        GenericTypeParameterBuilder[] genericArgumentBuilders =
+                            methodBuilder.DefineGenericParameters(genericArgumentNames)!;
+                        for (int i = 0; i < genericArgumentBuilders.Length; i++)
+                        {
+                            typeRemapping[genericArguments[i]] = genericArgumentBuilders[i];
+                        }
+                    }
+
+                    methodBuilder.SetReturnType(typeRemapping.ContainsKey(method.ReturnType)
+                        ? typeRemapping[method.ReturnType]
+                        : method.ReturnType);
+                    methodBuilder.SetParameters(Array.ConvertAll(methodParameters, p => typeRemapping.ContainsKey(p.ParameterType) ? typeRemapping[p.ParameterType] : p.ParameterType));
+
                     ILGenerator il = methodBuilder.GetILGenerator();
 
                     EmitThrowIfDisposed(proxyTypeBuilder, il, disposedField);
@@ -305,21 +327,31 @@ internal static class ProxyGeneration
 
                     Label positionalArgsLabel = il.DefineLabel();
 
-                    ParameterInfo cancellationTokenParameter = methodParameters.FirstOrDefault(p => p.ParameterType == typeof(CancellationToken));
-                    int argumentCountExcludingCancellationToken = methodParameters.Length - (cancellationTokenParameter is not null ? 1 : 0);
+                    ParameterInfo cancellationTokenParameter =
+                        methodParameters.FirstOrDefault(p => p.ParameterType == typeof(CancellationToken));
+                    int argumentCountExcludingCancellationToken = methodParameters.Length -
+                                                                  (cancellationTokenParameter is not null ? 1 : 0);
                     VerifySupported(cancellationTokenParameter is null || cancellationTokenParameter.Position == methodParameters.Length - 1, Resources.CancellationTokenMustBeLastParameter, method);
 
-                    // if (this.options.ServerRequiresNamedArguments) {
-                    il.Emit(OpCodes.Ldarg_0);
-                    il.Emit(OpCodes.Ldfld, optionsField);
-                    il.EmitCall(OpCodes.Callvirt, ServerRequiresNamedArgumentsPropertyGetter, null);
-                    il.Emit(OpCodes.Brfalse, positionalArgsLabel);
+                    // if (!method.IsGenericMethod && this.options.ServerRequiresNamedArguments) {
+                    if (!method.IsGenericMethod)
+                    {
+                        il.Emit(OpCodes.Ldarg_0);
+                        il.Emit(OpCodes.Ldfld, optionsField);
+                        il.EmitCall(OpCodes.Callvirt, ServerRequiresNamedArgumentsPropertyGetter, null);
+                        il.Emit(OpCodes.Brfalse, positionalArgsLabel);
+                    }
 
                     // The second argument is a single parameter object.
                     {
-                        if (argumentCountExcludingCancellationToken > 0)
+                        if (argumentCountExcludingCancellationToken > 0 || method.IsGenericMethod)
                         {
-                            ConstructorInfo paramObjectCtor = CreateParameterObjectType(proxyModuleBuilder, methodParameters.Take(argumentCountExcludingCancellationToken).ToArray());
+                            ConstructorInfo paramObjectCtor = CreateParameterObjectType(
+                                proxyModuleBuilder,
+                                methodParameters.Take(argumentCountExcludingCancellationToken).ToArray(),
+                                method.IsGenericMethodDefinition ? method.GetGenericArguments() : Type.EmptyTypes
+                            );
+
                             for (int i = 0; i < argumentCountExcludingCancellationToken; i++)
                             {
                                 il.Emit(OpCodes.Ldarg, i + 1);
@@ -337,9 +369,12 @@ internal static class ProxyGeneration
 
                         // Construct the InvokeAsync<T> method with the T argument supplied if we have a return type.
                         MethodInfo invokingMethod =
-                            invokeResultTypeArgument is not null ? invokeWithParameterObjectAsyncOfTaskOfTMethodInfo.MakeGenericMethod(invokeResultTypeArgument) :
-                            returnTypeIsVoid ? notifyWithParameterObjectAsyncOfTaskMethodInfo :
-                            invokeWithParameterObjectAsyncOfTaskMethodInfo;
+                            invokeResultTypeArgument is not null
+                                ? invokeWithParameterObjectAsyncOfTaskOfTMethodInfo.MakeGenericMethod(
+                                    invokeResultTypeArgument)
+                                : returnTypeIsVoid
+                                    ? notifyWithParameterObjectAsyncOfTaskMethodInfo
+                                    : invokeWithParameterObjectAsyncOfTaskMethodInfo;
 
                         CompleteCall(invokingMethod);
                     }
@@ -372,13 +407,16 @@ internal static class ProxyGeneration
                         }
 
                         // The third argument is a Type[] describing each parameter type.
-                        LoadParameterTypeArrayField(proxyTypeBuilder, methodParameters.Take(argumentCountExcludingCancellationToken).ToArray(), il);
+                        LoadParameterTypeArrayField(proxyTypeBuilder,
+                            methodParameters.Take(argumentCountExcludingCancellationToken).ToArray(), il);
 
                         // Construct the InvokeAsync<T> method with the T argument supplied if we have a return type.
                         MethodInfo invokingMethod =
-                            invokeResultTypeArgument is object ? invokeWithCancellationAsyncOfTaskOfTMethodInfo.MakeGenericMethod(invokeResultTypeArgument) :
-                            returnTypeIsVoid ? NotifyAsyncOfTaskMethodInfo :
-                            invokeWithCancellationAsyncOfTaskMethodInfo;
+                            invokeResultTypeArgument is object
+                                ? invokeWithCancellationAsyncOfTaskOfTMethodInfo.MakeGenericMethod(invokeResultTypeArgument)
+                                : returnTypeIsVoid
+                                    ? NotifyAsyncOfTaskMethodInfo
+                                    : invokeWithCancellationAsyncOfTaskMethodInfo;
 
                         CompleteCall(invokingMethod);
                     }
@@ -423,9 +461,14 @@ internal static class ProxyGeneration
             GeneratedProxiesByInterface.Add(generatedProxyKey, generatedType);
 
 #if SaveAssembly
-            ((AssemblyBuilder)proxyModuleBuilder.Assembly).Save(proxyModuleBuilder.ScopeName);
-            System.IO.File.Delete(proxyModuleBuilder.ScopeName + ".dll");
-            System.IO.File.Move(proxyModuleBuilder.ScopeName, proxyModuleBuilder.ScopeName + ".dll");
+            var assemblySaveMethod = typeof(AssemblyBuilder).GetMethod("Save", BindingFlags.Instance | BindingFlags.Public, null, CallingConventions.Any, new[] { typeof(string) }, null);
+
+            if (assemblySaveMethod != null)
+            {
+                assemblySaveMethod?.Invoke(proxyModuleBuilder.Assembly, new object[] { proxyModuleBuilder.ScopeName });
+                System.IO.File.Delete(proxyModuleBuilder.ScopeName + ".dll");
+                System.IO.File.Move(proxyModuleBuilder.ScopeName, proxyModuleBuilder.ScopeName + ".dll");
+            }
 #endif
         }
 
@@ -715,6 +758,9 @@ internal static class ProxyGeneration
         // We maintain a dictionary to point at dynamic modules based on the set of skip visiblity check assemblies they were generated with.
         ImmutableHashSet<AssemblyName> skipVisibilityCheckAssemblies = SkipClrVisibilityChecks.GetSkipVisibilityChecksRequirements(interfaceType)
             .Add(typeof(ProxyGeneration).Assembly.GetName());
+
+        // If we're saving it, we need individual assemblies, because we can't alter assemblies that have already been saved.
+#if !SaveAssembly
         foreach ((ImmutableHashSet<AssemblyName> SkipVisibilitySet, ModuleBuilder Builder) existingSet in TransparentProxyModuleBuilderByVisibilityCheck)
         {
             if (existingSet.SkipVisibilitySet.IsSupersetOf(skipVisibilityCheckAssemblies))
@@ -722,6 +768,7 @@ internal static class ProxyGeneration
                 return existingSet.Builder;
             }
         }
+#endif
 
         // As long as we're going to start a new module, let's maximize the chance that this is the last one
         // by skipping visibility checks on ALL assemblies loaded so far.
@@ -729,7 +776,7 @@ internal static class ProxyGeneration
         ////skipVisibilityCheckAssemblies = skipVisibilityCheckAssemblies.Union(AppDomain.CurrentDomain.GetAssemblies().Select(a => a.GetName()));
 
         AssemblyBuilder assemblyBuilder = CreateProxyAssemblyBuilder();
-        ModuleBuilder moduleBuilder = assemblyBuilder.DefineDynamicModule("rpcProxies");
+        ModuleBuilder moduleBuilder = assemblyBuilder.DefineDynamicModule($"rpcProxies.{interfaceType.FullName.Replace('+', '.')}");
         var skipClrVisibilityChecks = new SkipClrVisibilityChecks(assemblyBuilder, moduleBuilder);
         skipClrVisibilityChecks.SkipVisibilityChecksFor(skipVisibilityCheckAssemblies);
         TransparentProxyModuleBuilderByVisibilityCheck.Add((skipVisibilityCheckAssemblies, moduleBuilder));
@@ -740,17 +787,22 @@ internal static class ProxyGeneration
     private static AssemblyBuilder CreateProxyAssemblyBuilder()
     {
         var proxyAssemblyName = new AssemblyName(string.Format(CultureInfo.InvariantCulture, "rpcProxies_{0}", Guid.NewGuid()));
+
 #if SaveAssembly
-        return AssemblyBuilder.DefineDynamicAssembly(proxyAssemblyName, AssemblyBuilderAccess.RunAndSave);
+        if (!Enum.TryParse("RunAndSave", out AssemblyBuilderAccess access))
+        {
+            access = AssemblyBuilderAccess.RunAndCollect;
+        }
+        return AssemblyBuilder.DefineDynamicAssembly(proxyAssemblyName, access);
 #else
         return AssemblyBuilder.DefineDynamicAssembly(proxyAssemblyName, AssemblyBuilderAccess.RunAndCollect);
 #endif
     }
 
-    private static ConstructorInfo CreateParameterObjectType(ModuleBuilder moduleBuilder, ParameterInfo[] parameters)
+    private static ConstructorInfo CreateParameterObjectType(ModuleBuilder moduleBuilder, ParameterInfo[] parameters, Type[] genericArguments)
     {
         Requires.NotNull(parameters, nameof(parameters));
-        if (parameters.Length == 0)
+        if (parameters.Length == 0 && genericArguments.Length == 0)
         {
             return ObjectCtor;
         }
@@ -759,12 +811,25 @@ internal static class ProxyGeneration
             string.Format(CultureInfo.InvariantCulture, "_param_{0}", Guid.NewGuid()),
             TypeAttributes.NotPublic);
 
+        var typeRemapping = new Dictionary<Type, Type>();
+
+        if (genericArguments.Length > 0)
+        {
+            string[] genericArgumentNames = Array.ConvertAll(genericArguments, genericArgument => genericArgument.Name);
+            GenericTypeParameterBuilder[] genericArgumentBuilders = proxyTypeBuilder.DefineGenericParameters(genericArgumentNames)!;
+            for (int i = 0; i < genericArgumentBuilders.Length; i++)
+            {
+                typeRemapping[genericArguments[i]] = genericArgumentBuilders[i];
+                typeRemapping[genericArgumentBuilders[i]] = genericArguments[i];
+            }
+        }
+
         var parameterTypes = new Type[parameters.Length];
         var fields = new FieldBuilder[parameters.Length];
         for (int i = 0; i < parameters.Length; i++)
         {
-            parameterTypes[i] = parameters[i].ParameterType;
-            fields[i] = proxyTypeBuilder.DefineField(parameters[i].Name!, parameters[i].ParameterType, FieldAttributes.Public | FieldAttributes.InitOnly);
+            parameterTypes[i] = typeRemapping.ContainsKey(parameters[i].ParameterType) ? typeRemapping[parameters[i].ParameterType] : parameters[i].ParameterType;
+            fields[i] = proxyTypeBuilder.DefineField(parameters[i].Name!, parameterTypes[i], FieldAttributes.Public | FieldAttributes.InitOnly);
         }
 
         ConstructorBuilder ctor = proxyTypeBuilder.DefineConstructor(
@@ -789,10 +854,29 @@ internal static class ProxyGeneration
             il.Emit(OpCodes.Stfld, fields[i]);
         }
 
+        if (typeRemapping.Count > 0)
+        {
+            foreach (Type genericArgument in proxyTypeBuilder.GetGenericArguments())
+            {
+                var genericTypesField = proxyTypeBuilder.DefineField($"$genericType:{genericArgument.Name}", typeof(Type), FieldAttributes.Public | FieldAttributes.InitOnly);
+                il.Emit(OpCodes.Ldarg_0);
+                il.Emit(OpCodes.Ldtoken, genericArgument);
+                il.Emit(OpCodes.Call, GetTypeFromHandleMethod);
+                il.Emit(OpCodes.Stfld, genericTypesField);
+            }
+        }
+
         il.Emit(OpCodes.Ret);
 
         // Finalize the type
-        proxyTypeBuilder.CreateTypeInfo();
+        var proxyTypeInfo = proxyTypeBuilder.CreateTypeInfo();
+
+        if (typeRemapping.Count > 0)
+        {
+            var genericReferenceType = proxyTypeInfo.MakeGenericType(Array.ConvertAll(proxyTypeBuilder.GetGenericArguments(), t => typeRemapping[t]));
+            var types = Array.ConvertAll(parameters, p => p.ParameterType);
+            return genericReferenceType.GetConstructor(BindingFlags.Public | BindingFlags.Instance, null, CallingConventions.Any, types, null);
+        }
 
         return ctor;
     }

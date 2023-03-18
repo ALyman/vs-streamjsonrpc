@@ -33,6 +33,8 @@ public class JsonMessageFormatter : IJsonRpcAsyncMessageTextFormatter, IJsonRpcF
     /// </summary>
     internal const string ExceptionDataKey = "JToken";
 
+    private const string GenericTypeSpecifierFieldPrefix = "$genericType:";
+
     /// <summary>
     /// JSON parse settings.
     /// </summary>
@@ -784,10 +786,27 @@ public class JsonMessageFormatter : IJsonRpcAsyncMessageTextFormatter, IJsonRpcF
             }
         }
 
+        IDictionary<string, Type>? genericArguments = null;
+
+        if (arguments is IDictionary<string, object> argDictionary)
+        {
+            genericArguments = argDictionary.Where(pair => pair.Key.StartsWith(GenericTypeSpecifierFieldPrefix))
+                .ToDictionary(
+                    pair => pair.Key.Substring(GenericTypeSpecifierFieldPrefix.Length),
+                    pair => Type.GetType(pair.Value.ToString(), false)
+                );
+
+            foreach (string key in genericArguments.Keys)
+            {
+                argDictionary.Remove($"{GenericTypeSpecifierFieldPrefix}{key}");
+            }
+        }
+
         return new JsonRpcRequest(this)
         {
             RequestId = id,
             Method = json.Value<string>("method"),
+            GenericArguments = genericArguments,
             Arguments = arguments,
             TraceParent = json.Value<string>("traceparent"),
             TraceState = json.Value<string>("tracestate"),

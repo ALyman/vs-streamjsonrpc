@@ -43,11 +43,11 @@ public sealed class TargetMethod
             try
             {
                 Span<object?> args = argumentArray.AsSpan(0, parameterCount);
-                if (this.TryGetArguments(request, candidateMethod.Signature, args))
+                if (this.TryGetArguments(request, candidateMethod.Signature, args, out var resolvedSignature))
                 {
                     this.synchronizationContext = candidateMethod.SynchronizationContext ?? fallbackSynchronizationContext;
                     this.target = candidateMethod.Target;
-                    this.signature = candidateMethod.Signature;
+                    this.signature = resolvedSignature;
                     this.arguments = args.ToArray();
                     break;
                 }
@@ -131,7 +131,7 @@ public sealed class TargetMethod
         this.errorMessages.Add(message);
     }
 
-    private bool TryGetArguments(JsonRpcRequest request, MethodSignature method, Span<object?> arguments)
+    private bool TryGetArguments(JsonRpcRequest request, MethodSignature method, Span<object?> arguments, out MethodSignature resolved)
     {
         Requires.NotNull(request, nameof(request));
         Requires.NotNull(method, nameof(method));
@@ -141,7 +141,15 @@ public sealed class TargetMethod
         if (method.HasOutOrRefParameters)
         {
             this.AddErrorMessage(string.Format(CultureInfo.CurrentCulture, Resources.MethodHasRefOrOutParameters, method));
+            resolved = default;
             return false;
+        }
+
+        if (method.IsGenericMethodDefinition)
+        {
+            resolved = method = method.MakeGenericMethod(
+                method.GenericArguments.Select(a => request.GenericArguments[a.Name])
+            );
         }
 
         // When there is a CancellationToken parameter, we require that it always be the last parameter.
@@ -157,6 +165,7 @@ public sealed class TargetMethod
         switch (request.TryGetTypedArguments(methodParametersExcludingCancellationToken, argumentsExcludingCancellationToken))
         {
             case JsonRpcRequest.ArgumentMatchResult.Success:
+                resolved = method;
                 return true;
             case JsonRpcRequest.ArgumentMatchResult.ParameterArgumentCountMismatch:
                 string methodParameterCount;
@@ -167,14 +176,18 @@ public sealed class TargetMethod
                     method,
                     methodParameterCount,
                     request.ArgumentCount));
+                resolved = default;
                 return false;
             case JsonRpcRequest.ArgumentMatchResult.ParameterArgumentTypeMismatch:
                 this.AddErrorMessage(string.Format(CultureInfo.CurrentCulture, Resources.MethodParametersNotCompatible, method));
+                resolved = default;
                 return false;
             case JsonRpcRequest.ArgumentMatchResult.MissingArgument:
                 this.AddErrorMessage(Resources.RequiredArgumentMissing);
+                resolved = default;
                 return false;
             default:
+                resolved = default;
                 return false;
         }
     }

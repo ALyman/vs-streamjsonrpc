@@ -57,8 +57,11 @@ public class JsonRpcRequest : JsonRpcMessage, IJsonRpcMessageWithId
     /// and the value is the argument, or an array of <see cref="object"/>.
     /// If neither of these, <see cref="ArgumentCount"/> and <see cref="TryGetArgumentByNameOrIndex(string, int, Type, out object)"/> should be overridden.
     /// </value>
-    [DataMember(Name = "params", Order = 3, IsRequired = false, EmitDefaultValue = false)]
+    [DataMember(Name = "params", Order = 4, IsRequired = false, EmitDefaultValue = false)]
     public object? Arguments { get; set; }
+
+    [IgnoreDataMember]
+    public IDictionary<string, Type> GenericArguments { get; set; }
 
     /// <summary>
     /// Gets or sets an identifier established by the client if a response to the request is expected.

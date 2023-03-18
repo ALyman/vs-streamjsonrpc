@@ -19,6 +19,7 @@
     <PackageReference Include="MessagePack" />
     <PackageReference Include="MessagePackAnalyzer" PrivateAssets="all" />
     <PackageReference Include="Microsoft.VisualStudio.Threading" />
+    <PackageReference Include="Microsoft.CSharp" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" PrivateAssets="compile" />
     <PackageReference Include="Nerdbank.Streams" />
     <PackageReference Include="Newtonsoft.Json" />

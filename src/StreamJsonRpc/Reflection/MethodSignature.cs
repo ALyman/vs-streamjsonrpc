@@ -13,6 +13,11 @@ internal sealed class MethodSignature : IEquatable<MethodSignature>
     private static readonly StringComparer TypeNameComparer = StringComparer.Ordinal;
 
     /// <summary>
+    /// Backing field for the lazily initialized <see cref="GenericArguments"/> property.
+    /// </summary>
+    private Type[]? genericParameters;
+
+    /// <summary>
     /// Backing field for the lazily initialized <see cref="Parameters"/> property.
     /// </summary>
     private ParameterInfo[]? parameters;
@@ -28,7 +33,13 @@ internal sealed class MethodSignature : IEquatable<MethodSignature>
 
     internal JsonRpcMethodAttribute? Attribute { get; }
 
-    internal ParameterInfo[] Parameters => this.parameters ?? (this.parameters = this.MethodInfo.GetParameters() ?? Array.Empty<ParameterInfo>());
+    internal bool IsGenericMethod => this.MethodInfo.IsGenericMethod;
+
+    internal bool IsGenericMethodDefinition => this.MethodInfo.IsGenericMethodDefinition;
+
+    internal Type[] GenericArguments => this.MethodInfo.IsGenericMethod ? this.genericParameters ??= this.MethodInfo.GetGenericArguments() : Type.EmptyTypes;
+
+    internal ParameterInfo[] Parameters => this.parameters ??= this.MethodInfo.GetParameters();
 
     internal bool IsPublic => this.MethodInfo.IsPublic;
 
@@ -68,6 +79,21 @@ internal sealed class MethodSignature : IEquatable<MethodSignature>
             if (!MethodSignature.TypeNameComparer.Equals(
                     this.Parameters[index].ParameterType.AssemblyQualifiedName,
                     other.Parameters[index].ParameterType.AssemblyQualifiedName))
+            {
+                return false;
+            }
+        }
+
+        if (this.GenericArguments?.Length != other.GenericArguments?.Length)
+        {
+            return false;
+        }
+
+        for (int index = 0; this.MethodInfo.IsGenericMethod && index < this.GenericArguments?.Length; index++)
+        {
+            if (!MethodSignature.TypeNameComparer.Equals(
+                    this.GenericArguments[index].AssemblyQualifiedName,
+                    other.GenericArguments[index].AssemblyQualifiedName))
             {
                 return false;
             }
@@ -127,4 +153,9 @@ internal sealed class MethodSignature : IEquatable<MethodSignature>
     }
 
     private static bool IsCancellationToken(ParameterInfo parameter) => parameter?.ParameterType.Equals(typeof(CancellationToken)) ?? false;
+
+    public MethodSignature MakeGenericMethod(IEnumerable<Type> arguments)
+    {
+        return new MethodSignature(this.MethodInfo.MakeGenericMethod(arguments.ToArray()), this.Attribute);
+    }
 }

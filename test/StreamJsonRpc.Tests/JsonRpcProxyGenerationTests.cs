@@ -1,13 +1,15 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
+using System.Text;
 using Microsoft;
 using Microsoft.VisualStudio.Threading;
-using Nerdbank;
+using Nerdbank.Streams;
 using StreamJsonRpc;
 using Xunit;
 using Xunit.Abstractions;
 using ExAssembly = StreamJsonRpc.Tests.ExternalAssembly;
+using FullDuplexStream = Nerdbank.FullDuplexStream;
 
 public class JsonRpcProxyGenerationTests : TestBase
 {
@@ -22,6 +24,7 @@ public class JsonRpcProxyGenerationTests : TestBase
         : base(logger)
     {
         var streams = FullDuplexStream.CreateStreams();
+
         this.serverStream = streams.Item1;
         this.clientStream = streams.Item2;
 
@@ -131,7 +134,10 @@ public class JsonRpcProxyGenerationTests : TestBase
 
     public interface IServerWithGenericMethod
     {
-        Task AddAsync<T>(T a, T b);
+        Task<T> EchoAsync<T>(T a);
+
+        Task<string> TypeName<T>();
+
     }
 
     internal interface IServerInternal : ExAssembly.ISomeInternalProxyInterface, IServerInternalWithInternalTypesFromOtherAssemblies
@@ -326,10 +332,43 @@ public class JsonRpcProxyGenerationTests : TestBase
 
     [Fact]
     [Trait("NegativeTest", "")]
-    public void GenericMethodOnInterface()
+    public async Task GenericMethodOnInterface()
     {
-        var exception = Assert.Throws<NotSupportedException>(() => JsonRpc.Attach<IServerWithGenericMethod>(this.clientStream));
-        this.Logger.WriteLine(exception.Message);
+        List<string> log = new();
+        this.serverStream.BeforeWrite += delegate(FullDuplexStream stream, byte[] buffer, int offset, int count)
+        {
+            log.Add($"S> {Encoding.UTF8.GetString(buffer, offset, count)}");
+        };
+        this.clientStream.BeforeWrite += delegate(FullDuplexStream stream, byte[] buffer, int offset, int count)
+        {
+            log.Add($"C> {Encoding.UTF8.GetString(buffer, offset, count)}");
+        };
+
+        try
+        {
+            var clientRpc = ((IJsonRpcClientProxy)this.clientRpc).JsonRpc.Attach<IServerWithGenericMethod>();
+            Assert.Equal("Andrew", await clientRpc.EchoAsync("Andrew"));
+            Assert.Equal(3, await clientRpc.EchoAsync(3));
+
+            Assert.Equal("System.String", await clientRpc.TypeName<string>());
+            Assert.Equal("System.Int32", await clientRpc.TypeName<int>());
+
+        }
+        catch
+        {
+            Assert.NotEmpty(log);
+            throw;
+        }
+    }
+
+    public class TestProxyArgs<T>
+    {
+        private Type genericType;
+
+        public TestProxyArgs()
+        {
+            this.genericType = typeof(T);
+        }
     }
 
     [Fact]
@@ -726,7 +765,7 @@ public class JsonRpcProxyGenerationTests : TestBase
         public string? Color { get; set; }
     }
 
-    internal class Server : IServerDerived, IServer2, IServer3, IServerWithValueTasks, IServerWithVoidReturnType
+    internal class Server : IServerDerived, IServer2, IServer3, IServerWithValueTasks, IServerWithVoidReturnType, IServerWithGenericMethod
     {
         public event EventHandler? ItHappened;
 
@@ -806,6 +845,10 @@ public class JsonRpcProxyGenerationTests : TestBase
         {
             throw new NotImplementedException();
         }
+
+        public Task<T> EchoAsync<T>(T a) => Task.FromResult(a);
+
+        public Task<string> TypeName<T>() => Task.FromResult(typeof(T).FullName);
 
         internal void OnItHappened(EventArgs args) => this.ItHappened?.Invoke(this, args);
 
